@@ -33,7 +33,7 @@ argon2 = [
     "argon2-cffi>=25.1.0",
 ]
 fastapi = [
-    "fastapi>=0.162.7",
+    "fastapi>=0.115.0",
 ]
 
 [build-system]
@@ -46,7 +46,7 @@ module-root = ""
 [dependency-groups]
 dev = [
     "argon2-cffi>=25.1.0",
-    "fastapi>=0.162.7",
+    "fastapi>=0.115.0",
     "httpx>=0.28.1",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",

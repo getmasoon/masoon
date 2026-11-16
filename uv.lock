@@ -334,14 +334,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "argon2-cffi", marker = "extra == 'argon2'", specifier = ">=25.1.0" },
-    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.162.7" },
+    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.115.0" },
 ]
 provides-extras = ["argon2", "fastapi"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "argon2-cffi", specifier = ">=25.1.0" },
-    { name = "fastapi", specifier = ">=0.162.7" },
+    { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pre-commit", specifier = ">=4.7.0" },
     { name = "pytest", specifier = ">=9.2.0" },
