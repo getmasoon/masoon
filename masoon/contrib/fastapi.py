@@ -4,6 +4,7 @@ Requires the optional ``fastapi`` extra: ``pip install 'masoon[fastapi]'``.
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -24,6 +25,14 @@ def _not_authenticated() -> HTTPException:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Session:
+    """Hold the validated session token and identity of a request."""
+
+    token: str
+    identity: Identity
+
+
 class MasoonFastAPI:
     """Provide FastAPI dependencies that authenticate and authorize requests.
 
@@ -31,11 +40,15 @@ class MasoonFastAPI:
 
     - ``current_identity`` returns the identity of the logged-in user, or responds
       with 401 if the session token is missing, invalid, expired, or revoked.
+    - ``current_token`` returns the validated session token of the request, for
+      example to revoke it when the user logs out. It responds with 401 in the same
+      cases as ``current_identity``.
     - ``require_permission(permission)`` also responds with 403 unless the user has
       the permission.
 
     The session token is read from the ``Authorization: Bearer <token>`` header, or
-    from a cookie if the header is not present.
+    from a cookie if the header is not present. The token is validated only once per
+    request, even if a route uses several of these dependencies.
     """
 
     def __init__(
@@ -55,15 +68,16 @@ class MasoonFastAPI:
 
         """
         self._authorizer = authorizer
+        self._cookie_name = cookie_name
 
         bearer = HTTPBearer(auto_error=False)
         cookie = APIKeyCookie(name=cookie_name, auto_error=False)
 
-        def current_identity(
+        def current_session(
             credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
             cookie_token: Annotated[str | None, Depends(cookie)],
-        ) -> Identity:
-            """Return the identity of the user who sent the request.
+        ) -> _Session:
+            """Return the validated session of the request.
 
             Raises:
                 HTTPException: 401 if the session token is missing or not valid.
@@ -78,9 +92,37 @@ class MasoonFastAPI:
             except InvalidSessionError:
                 raise _not_authenticated() from None
 
-            return identity
+            return _Session(token=token, identity=identity)
+
+        def current_identity(
+            session: Annotated[_Session, Depends(current_session)],
+        ) -> Identity:
+            """Return the identity of the user who sent the request.
+
+            Raises:
+                HTTPException: 401 if the session token is missing or not valid.
+
+            """
+            return session.identity
+
+        def current_token(
+            session: Annotated[_Session, Depends(current_session)],
+        ) -> str:
+            """Return the validated session token of the request.
+
+            Raises:
+                HTTPException: 401 if the session token is missing or not valid.
+
+            """
+            return session.token
 
         self.current_identity: Callable[..., Identity] = current_identity
+        self.current_token: Callable[..., str] = current_token
+
+    @property
+    def cookie_name(self) -> str:
+        """Return the name of the cookie that holds the session token."""
+        return self._cookie_name
 
     def require_permission(self, permission: str) -> Callable[..., Identity]:
         """Return a dependency that requires the user to have a permission.
