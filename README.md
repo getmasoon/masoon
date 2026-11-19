@@ -15,6 +15,8 @@ Framework-agnostic authentication and authorization for Python.
 - **Role-based access control**: define roles in code, assign them to users, and check
   permissions. Access is denied by default.
 - **Argon2 password hashing** with secure defaults (optional extra).
+- **FastAPI integration**: protect routes with a login or a permission check in one line
+  (optional extra).
 - **Bring your own storage**: plug in any database or ORM by implementing a small protocol.
 - **Safe failures**: a wrong password and an unknown username raise the same error and take
   about the same time, so attackers cannot discover which usernames exist.
@@ -24,7 +26,7 @@ Framework-agnostic authentication and authorization for Python.
 **Planned**
 
 - Composable authorization policies.
-- Integrations for FastAPI, Django, and Flask.
+- Integrations for Django and Flask.
 
 ## Installation
 
@@ -43,6 +45,13 @@ uv add 'masoon[argon2]'
 
 Installing plain `masoon` gives you the core only. You then need to provide your own
 password hasher.
+
+To use the FastAPI integration, add the `fastapi` extra. You can install several extras at
+once:
+
+```bash
+pip install 'masoon[argon2,fastapi]'
+```
 
 ## Quick start
 
@@ -179,6 +188,141 @@ How authorization works:
 
 `InMemoryRoleAssignmentStore` is meant for tests and examples. In a real application,
 store role assignments in your own database as shown below.
+
+## FastAPI
+
+The `fastapi` extra adds `MasoonFastAPI`, which provides FastAPI dependencies for
+authentication and authorization. Create it once with your `SessionManager` and, if your
+routes check permissions, your `Authorizer`.
+
+```python
+from datetime import timedelta
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, Response, status
+from pydantic import BaseModel
+
+from masoon import (
+    Argon2PasswordHasher,
+    Authenticator,
+    Authorizer,
+    Identity,
+    InMemoryRoleAssignmentStore,
+    InMemorySessionStore,
+    InMemoryUserStore,
+    InvalidCredentialsError,
+    Role,
+    SessionManager,
+    StoredUser,
+)
+from masoon.contrib.fastapi import MasoonFastAPI
+
+hasher = Argon2PasswordHasher()
+users = InMemoryUserStore()
+users.add(
+    StoredUser(
+        id="1",
+        username="alice",
+        hashed_password=hasher.hash_password(password="correct horse battery staple"),
+    ),
+)
+
+assignments = InMemoryRoleAssignmentStore()
+assignments.assign(user_id="1", role_name="editor")
+
+authenticator = Authenticator(store=users, hasher=hasher)
+sessions = SessionManager(store=InMemorySessionStore(), validity=timedelta(days=1))
+authorizer = Authorizer(
+    roles=[Role(name="editor", permissions=frozenset({"posts:read", "posts:edit"}))],
+    assignments=assignments,
+)
+
+masoon = MasoonFastAPI(sessions, authorizer)
+app = FastAPI()
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/login")
+def login(credentials: LoginRequest) -> dict[str, str]:
+    try:
+        identity = authenticator.authenticate(
+            username=credentials.username,
+            password=credentials.password,
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        ) from None
+    return {"access_token": sessions.create(identity), "token_type": "bearer"}
+
+
+# Works whether the token was sent in the header or in the cookie.
+@app.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    token: Annotated[str, Depends(masoon.current_token)],
+    response: Response,
+) -> None:
+    sessions.revoke(token)
+    response.delete_cookie(masoon.cookie_name)
+
+
+# Any logged-in user.
+@app.get("/me")
+def me(identity: Annotated[Identity, Depends(masoon.current_identity)]) -> dict[str, str]:
+    return {"id": identity.id, "username": identity.username}
+
+
+# Only users with the posts:edit permission.
+@app.put("/posts/{post_id}")
+def edit_post(
+    post_id: int,
+    identity: Annotated[Identity, Depends(masoon.require_permission("posts:edit"))],
+) -> dict[str, str]:
+    return {"edited": str(post_id), "by": identity.username}
+```
+
+Clients send the token from `/login` in the `Authorization` header:
+
+```text
+Authorization: Bearer <access_token>
+```
+
+How the integration works:
+
+- **Where the token comes from.** The token is read from the `Authorization: Bearer`
+  header. If there is no bearer header, it is read from a cookie named `session`. Change
+  the name with `MasoonFastAPI(sessions, authorizer, cookie_name="...")`. If a bearer
+  header is present but invalid, the request is rejected; the cookie is not used instead.
+- **401 Unauthorized.** A missing, invalid, expired, or revoked token always returns the
+  same response, `{"detail": "Not authenticated"}`, with a `WWW-Authenticate: Bearer`
+  header. The client cannot tell why the token was rejected.
+- **403 Forbidden.** A logged-in user without the required permission gets
+  `{"detail": "Forbidden"}`. The response does not name the missing permission.
+- **Logging out.** `current_token` returns the validated session token of the request,
+  from the header or the cookie, so a logout route can revoke it. It responds with 401 in
+  the same cases as `current_identity`. `masoon.cookie_name` gives the cookie name, so the
+  route can also clear the cookie.
+- **One check per request.** The token is validated only once, even if a route uses
+  `current_identity`, `current_token`, and `require_permission` together.
+- **Setup errors.** Calling `require_permission` without passing an `Authorizer` raises
+  `ValueError` when your routes are defined, not during a request.
+- **API docs.** Both token locations appear in FastAPI's `/docs` page, so you can test
+  protected routes with the **Authorize** button.
+
+Define the login route with `def`, not `async def`. Argon2 is deliberately slow, and FastAPI
+runs `def` routes in a thread pool so that hashing does not block other requests.
+
+If you store the token in a cookie instead of returning it, set the cookie with
+`httponly=True`, `secure=True`, and `samesite="lax"` so that scripts cannot read it and it
+is only sent over HTTPS.
+
+`MasoonFastAPI` is imported from `masoon.contrib.fastapi`, not from `masoon`, so that
+`import masoon` keeps working without FastAPI installed.
 
 ## Using your own database
 
