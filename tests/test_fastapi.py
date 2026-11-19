@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response, status
 from fastapi.testclient import TestClient
 
 from masoon import (
@@ -34,6 +34,7 @@ class FakeTime:
 class App:
     client: TestClient
     sessions: SessionManager
+    masoon: MasoonFastAPI
     clock: FakeTime
     editor_token: str
     viewer_token: str
@@ -74,9 +75,29 @@ def app() -> App:
     ) -> dict[str, str]:
         return {"id": identity.id}
 
+    @fastapi_app.get("/token")
+    def token(session_token: Annotated[str, Depends(masoon.current_token)]) -> dict[str, str]:
+        return {"token": session_token}
+
+    @fastapi_app.get("/both")
+    def both(
+        identity: Annotated[Identity, Depends(masoon.current_identity)],
+        session_token: Annotated[str, Depends(masoon.current_token)],
+    ) -> dict[str, str]:
+        return {"id": identity.id, "token": session_token}
+
+    @fastapi_app.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+    def logout(
+        session_token: Annotated[str, Depends(masoon.current_token)],
+        response: Response,
+    ) -> None:
+        sessions.revoke(session_token)
+        response.delete_cookie(masoon.cookie_name)
+
     return App(
         client=TestClient(fastapi_app),
         sessions=sessions,
+        masoon=masoon,
         clock=clock,
         editor_token=sessions.create(Identity(id="1", username="alice")),
         viewer_token=sessions.create(Identity(id="2", username="bob")),
@@ -281,3 +302,89 @@ def test_import_works_without_fastapi(monkeypatch: pytest.MonkeyPatch) -> None:
     assert package.SessionManager is not None
     with pytest.raises(ImportError):
         importlib.import_module("masoon.contrib.fastapi")
+
+
+# Session token and logout
+
+
+def test_current_token_from_bearer_header(app: App) -> None:
+    response = app.client.get("/token", headers=bearer(app.editor_token))
+
+    assert response.status_code == 200
+    assert response.json() == {"token": app.editor_token}
+
+
+def test_current_token_from_cookie(app: App) -> None:
+    app.client.cookies.set(COOKIE_NAME, app.viewer_token)
+
+    response = app.client.get("/token")
+
+    assert response.status_code == 200
+    assert response.json() == {"token": app.viewer_token}
+
+
+def test_current_token_requires_a_valid_session(app: App) -> None:
+    missing = app.client.get("/token")
+    invalid = app.client.get("/token", headers=bearer("not-a-real-token"))
+
+    assert_not_authenticated(
+        missing.status_code, missing.json(), missing.headers.get("www-authenticate")
+    )
+    assert_not_authenticated(
+        invalid.status_code, invalid.json(), invalid.headers.get("www-authenticate")
+    )
+
+
+def test_current_identity_and_token_belong_to_the_same_session(app: App) -> None:
+    response = app.client.get("/both", headers=bearer(app.editor_token))
+
+    assert response.json() == {"id": "1", "token": app.editor_token}
+
+
+def test_token_is_validated_once_per_request(app: App, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    validate = app.sessions.validate
+
+    def counting_validate(token: str) -> Identity:
+        calls.append(token)
+        return validate(token)
+
+    monkeypatch.setattr(app.sessions, "validate", counting_validate)
+
+    app.client.get("/both", headers=bearer(app.editor_token))
+
+    assert calls == [app.editor_token]
+
+
+def test_logout_with_bearer_header_revokes_the_session(app: App) -> None:
+    response = app.client.post("/logout", headers=bearer(app.editor_token))
+    after = app.client.get("/me", headers=bearer(app.editor_token))
+
+    assert response.status_code == 204
+    assert after.status_code == 401
+
+
+def test_logout_with_cookie_revokes_the_session_and_clears_the_cookie(app: App) -> None:
+    app.client.cookies.set(COOKIE_NAME, app.viewer_token)
+
+    response = app.client.post("/logout")
+
+    assert response.status_code == 204
+    assert f'{COOKIE_NAME}=""' in response.headers["set-cookie"]
+
+    app.client.cookies.set(COOKIE_NAME, app.viewer_token)
+    after = app.client.get("/me")
+
+    assert after.status_code == 401
+
+
+def test_logout_without_session_returns_401(app: App) -> None:
+    response = app.client.post("/logout")
+
+    assert_not_authenticated(
+        response.status_code, response.json(), response.headers.get("www-authenticate")
+    )
+
+
+def test_cookie_name_is_exposed(app: App) -> None:
+    assert app.masoon.cookie_name == COOKIE_NAME
