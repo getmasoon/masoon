@@ -40,10 +40,13 @@ class InvalidSessionError(AuthenticationError):
 class PermissionDeniedError(AuthorizationError):
     """Raised when the required permission is not granted."""
 
-    def __init__(self, permission_name: str) -> None:
-        """Initialize the exception with the denied permission name."""
-        self.permission_name = permission_name
-        super().__init__(f"Permission denied: {permission_name}")
+    def __init__(self, permission_name: str | None = None) -> None:
+        """Initialize the exception with the optional denied permission name."""
+        self.permission_name: str | None = permission_name
+        if permission_name is None:
+            super().__init__("Permission denied.")
+        else:
+            super().__init__(f"Permission denied: {permission_name}")
 
 
 class UserAlreadyExistsError(MasoonError):
