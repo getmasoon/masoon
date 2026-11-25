@@ -13,10 +13,12 @@ from masoon import (
     Identity,
     InMemoryRoleAssignmentStore,
     InMemorySessionStore,
+    PermissionDeniedError,
     Role,
     SessionManager,
+    enforce,
 )
-from masoon.contrib.fastapi import MasoonFastAPI
+from masoon.contrib.fastapi import MasoonFastAPI, add_exception_handlers
 
 COOKIE_NAME = "sid"
 NOT_AUTHENTICATED = {"detail": "Not authenticated"}
@@ -388,3 +390,80 @@ def test_logout_without_session_returns_401(app: App) -> None:
 
 def test_cookie_name_is_exposed(app: App) -> None:
     assert app.masoon.cookie_name == COOKIE_NAME
+
+
+def _policy_app(*, with_handlers: bool) -> TestClient:
+    alice = Identity(id="1", username="alice")
+    fastapi_app = FastAPI()
+    if with_handlers:
+        add_exception_handlers(fastapi_app)
+
+    @fastapi_app.get("/posts/{owner_id}")
+    def read_post(owner_id: str) -> dict[str, str]:
+        enforce(lambda identity, owner: identity.id == owner, alice, owner_id)
+        return {"owner": owner_id}
+
+    @fastapi_app.get("/broken")
+    def broken() -> dict[str, str]:
+        msg = "unrelated bug"
+        raise ValueError(msg)
+
+    return TestClient(fastapi_app, raise_server_exceptions=False)
+
+
+def test_exception_handler_turns_policy_denial_into_403() -> None:
+    client = _policy_app(with_handlers=True)
+
+    response = client.get("/posts/2")
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert response.json() == {"detail": "Forbidden"}
+    assert "www-authenticate" not in response.headers
+
+
+def test_exception_handler_matches_require_permission_response(app: App) -> None:
+    policy_response = _policy_app(with_handlers=True).get("/posts/2")
+    permission_response = app.client.get("/posts/delete", headers=bearer(app.editor_token))
+
+    assert policy_response.status_code == permission_response.status_code
+    assert policy_response.json() == permission_response.json()
+
+
+def test_exception_handler_allows_permitted_requests() -> None:
+    client = _policy_app(with_handlers=True)
+
+    response = client.get("/posts/1")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"owner": "1"}
+
+
+def test_exception_handler_does_not_reveal_permission_name() -> None:
+    fastapi_app = FastAPI()
+    add_exception_handlers(fastapi_app)
+
+    @fastapi_app.get("/secret")
+    def secret() -> None:
+        permission = "posts:delete"
+        raise PermissionDeniedError(permission)
+
+    response = TestClient(fastapi_app).get("/secret")
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert "posts:delete" not in response.text
+
+
+def test_exception_handler_does_not_affect_other_errors() -> None:
+    client = _policy_app(with_handlers=True)
+
+    response = client.get("/broken")
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+def test_policy_denial_without_handler_is_a_server_error() -> None:
+    client = _policy_app(with_handlers=False)
+
+    response = client.get("/posts/2")
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
