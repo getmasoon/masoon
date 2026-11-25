@@ -7,13 +7,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyCookie, HTTPAuthorizationCredentials, HTTPBearer
 
 from masoon.authn.sessions import SessionManager
 from masoon.authz.rbac import Authorizer
 from masoon.errors import InvalidSessionError, PermissionDeniedError
 from masoon.types import Identity
+
+_FORBIDDEN_DETAIL = "Forbidden"
 
 
 def _not_authenticated() -> HTTPException:
@@ -155,9 +158,30 @@ class MasoonFastAPI:
             except PermissionDeniedError:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Forbidden",
+                    detail=_FORBIDDEN_DETAIL,
                 ) from None
 
             return identity
 
         return permission_dependency
+
+
+async def _permission_denied_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    """Return the 403 response used when a permission or policy check fails."""
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={"detail": _FORBIDDEN_DETAIL},
+    )
+
+
+def add_exception_handlers(app: FastAPI) -> None:
+    """Register handlers that turn Masoon errors raised in routes into HTTP responses.
+
+    Call this once after creating your application. Afterwards, a
+    ``PermissionDeniedError`` raised inside a route, for example by ``enforce``,
+    returns 403 with ``{"detail": "Forbidden"}``, the same response as
+    ``require_permission``. Without the handler, FastAPI returns 500.
+
+    The response does not reveal which permission or policy rule failed.
+    """
+    app.add_exception_handler(PermissionDeniedError, _permission_denied_handler)

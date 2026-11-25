@@ -5,6 +5,15 @@ from typing import TYPE_CHECKING
 from masoon.authn.authenticator import Authenticator
 from masoon.authn.passwords import PasswordHasher
 from masoon.authn.sessions import SessionManager
+from masoon.authz.policies import (
+    Policy,
+    all_of,
+    any_of,
+    enforce,
+    has_permission,
+    is_owner,
+    not_,
+)
 from masoon.authz.rbac import Authorizer
 from masoon.errors import (
     AuthenticationError,
@@ -49,6 +58,7 @@ __all__ = [
     "MasoonError",
     "PasswordHasher",
     "PermissionDeniedError",
+    "Policy",
     "Role",
     "RoleAssignmentStore",
     "SessionManager",
@@ -59,6 +69,12 @@ __all__ = [
     "UserAlreadyExistsError",
     "UserRecord",
     "UserStore",
+    "all_of",
+    "any_of",
+    "enforce",
+    "has_permission",
+    "is_owner",
+    "not_",
 ]
 
 

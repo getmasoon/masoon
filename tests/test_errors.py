@@ -59,3 +59,12 @@ def test_permission_denied_error() -> None:
     assert error.permission_name == "posts:edit"
     assert isinstance(error, AuthorizationError)
     assert isinstance(error, MasoonError)
+
+
+def test_permission_denied_error_without_permission() -> None:
+    error = PermissionDeniedError()
+
+    assert str(error) == "Permission denied."
+    assert error.permission_name is None
+    assert isinstance(error, AuthorizationError)
+    assert isinstance(error, MasoonError)
