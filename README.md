@@ -14,6 +14,8 @@ Framework-agnostic authentication and authorization for Python.
   token is stored.
 - **Role-based access control**: define roles in code, assign them to users, and check
   permissions. Access is denied by default.
+- **Authorization policies**: combine rules such as "editors, or the post's author" for
+  decisions that depend on the resource being accessed.
 - **Argon2 password hashing** with secure defaults (optional extra).
 - **FastAPI integration**: protect routes with a login or a permission check in one line
   (optional extra).
@@ -25,7 +27,6 @@ Framework-agnostic authentication and authorization for Python.
 
 **Planned**
 
-- Composable authorization policies.
 - Integrations for Django and Flask.
 
 ## Installation
@@ -189,6 +190,106 @@ How authorization works:
 `InMemoryRoleAssignmentStore` is meant for tests and examples. In a real application,
 store role assignments in your own database as shown below.
 
+## Policies
+
+Roles answer "can editors edit posts?". Policies answer "can this user edit this post?",
+for rules that depend on the resource being accessed.
+
+A policy is any function that takes an `Identity` and a resource and returns `True` or
+`False`. Combine policies with `all_of`, `any_of`, and `not_`, then call `enforce` in your
+request handler.
+
+```python
+from dataclasses import dataclass
+
+from masoon import (
+    Authorizer,
+    Identity,
+    InMemoryRoleAssignmentStore,
+    PermissionDeniedError,
+    Policy,
+    Role,
+    any_of,
+    enforce,
+    has_permission,
+    is_owner,
+)
+
+
+@dataclass(frozen=True)
+class Post:
+    id: int
+    author_id: str
+    published: bool
+
+
+assignments = InMemoryRoleAssignmentStore()
+assignments.assign(user_id="9", role_name="editor")
+authorizer = Authorizer(
+    roles=[Role(name="editor", permissions=frozenset({"posts:edit"}))],
+    assignments=assignments,
+)
+
+# Editors can edit any post. Authors can edit their own posts.
+can_edit: Policy[Post] = any_of(
+    has_permission(authorizer, "posts:edit"),
+    is_owner(lambda post: post.author_id),
+)
+
+alice = Identity(id="1", username="alice")
+bob = Identity(id="2", username="bob")
+editor = Identity(id="9", username="eve")
+post = Post(id=7, author_id="1", published=True)
+
+enforce(can_edit, alice, post)  # Allowed: Alice wrote the post.
+enforce(can_edit, editor, post)  # Allowed: Eve is an editor.
+
+try:
+    enforce(can_edit, bob, post)
+except PermissionDeniedError as error:
+    print(error)  # Permission denied.
+```
+
+Write your own policies as plain functions, and combine them with the built-in ones:
+
+```python
+def is_published(identity: Identity, post: Post) -> bool:
+    return post.published
+
+
+# Anyone can read published posts. Authors can also read their own drafts.
+can_read: Policy[Post] = any_of(is_published, is_owner(lambda post: post.author_id))
+```
+
+The building blocks:
+
+| Function | Allows access when |
+|---|---|
+| `all_of(*policies)` | Every policy allows it. Checking stops at the first denial. |
+| `any_of(*policies)` | At least one policy allows it. Checking stops at the first approval. |
+| `not_(policy)` | The policy denies it. |
+| `has_permission(authorizer, permission)` | The identity has the permission through its roles. |
+| `is_owner(get_owner_id)` | `get_owner_id(resource)` equals the identity's ID. |
+
+How policies work:
+
+- **`enforce` raises `PermissionDeniedError`** when the policy denies access. The message
+  is always `Permission denied.`, so it does not reveal which rule failed.
+- **Policies must return a `bool`.** A policy that returns anything else, such as a string
+  or `None`, raises `TypeError` instead of being treated as allowed. This catches mistakes
+  like `return post.author_id` where `return post.author_id == identity.id` was meant.
+- **`all_of()` and `any_of()` need at least one policy.** Calling them with none raises
+  `ValueError`, because an empty `all_of` would allow everything.
+- **Ownerless resources are denied.** If `get_owner_id` returns `None` or an empty
+  string, `is_owner` denies access. An identity with an empty ID owns nothing, so an empty
+  value never matches another empty value. Integer owner IDs are converted to strings
+  before they are compared, and `bool` owner IDs raise `TypeError`.
+- **Errors are not hidden.** If a policy raises an exception, it propagates to your code.
+
+In a FastAPI application, call `add_exception_handlers(app)` once so that a
+`PermissionDeniedError` raised by `enforce` returns 403 instead of 500. See
+[Policies in FastAPI routes](#policies-in-fastapi-routes).
+
 ## FastAPI
 
 The `fastapi` extra adds `MasoonFastAPI`, which provides FastAPI dependencies for
@@ -215,7 +316,7 @@ from masoon import (
     SessionManager,
     StoredUser,
 )
-from masoon.contrib.fastapi import MasoonFastAPI
+from masoon.contrib.fastapi import MasoonFastAPI, add_exception_handlers
 
 hasher = Argon2PasswordHasher()
 users = InMemoryUserStore()
@@ -239,6 +340,7 @@ authorizer = Authorizer(
 
 masoon = MasoonFastAPI(sessions, authorizer)
 app = FastAPI()
+add_exception_handlers(app)
 
 
 class LoginRequest(BaseModel):
@@ -313,6 +415,44 @@ How the integration works:
   `ValueError` when your routes are defined, not during a request.
 - **API docs.** Both token locations appear in FastAPI's `/docs` page, so you can test
   protected routes with the **Authorize** button.
+
+### Policies in FastAPI routes
+
+Policies usually depend on a resource that the route loads first, so call `enforce` inside
+the route. `add_exception_handlers(app)` turns the `PermissionDeniedError` it raises into
+the same 403 response that `require_permission` returns:
+
+```python
+from dataclasses import dataclass
+
+from masoon import Policy, enforce, is_owner
+
+
+@dataclass(frozen=True)
+class Post:
+    id: int
+    author_id: str
+
+
+POSTS = {1: Post(id=1, author_id="1"), 2: Post(id=2, author_id="2")}
+can_delete: Policy[Post] = is_owner(lambda post: post.author_id)
+
+
+@app.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_post(
+    post_id: int,
+    identity: Annotated[Identity, Depends(masoon.current_identity)],
+) -> None:
+    post = POSTS.get(post_id)
+    if post is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    enforce(can_delete, identity, post)  # 403 if the user is not the author.
+    del POSTS[post_id]
+```
+
+Without `add_exception_handlers`, FastAPI treats the error as a bug and returns
+`500 Internal Server Error`. The handler only changes `PermissionDeniedError`; other
+exceptions behave as before.
 
 Define the login route with `def`, not `async def`. Argon2 is deliberately slow, and FastAPI
 runs `def` routes in a thread pool so that hashing does not block other requests.
@@ -450,7 +590,7 @@ All exceptions raised by Masoon inherit from `MasoonError`.
 |---|---|
 | `InvalidCredentialsError` | The username does not exist or the password is wrong. |
 | `InvalidSessionError` | A session token is unknown, expired, or revoked. |
-| `PermissionDeniedError` | An identity does not have a required permission. The error names the permission. |
+| `PermissionDeniedError` | An identity does not have a required permission, or a policy denies access. For permissions, the error names the permission. |
 | `UserAlreadyExistsError` | A user is added to `InMemoryUserStore` with a username that is already taken. |
 | `AuthenticationError` | Base class for all authentication errors. |
 | `AuthorizationError` | Base class for all authorization errors. |
