@@ -15,6 +15,24 @@ type Policy[R] = Callable[[Identity, R], bool]
 """A function that returns whether an identity may access a resource of type ``R``."""
 
 
+def _check[R](policy: Policy[R], identity: Identity, resource: R) -> bool:
+    """Call a policy and return its result, which must be exactly ``True`` or ``False``.
+
+    A policy that returns anything else, such as a string or ``None``, has a bug. Treating
+    a non-empty string as "allowed" would grant access by mistake, so it is rejected.
+
+    Raises:
+        TypeError: If the policy does not return a ``bool``.
+
+    """
+    result = policy(identity, resource)
+    if not isinstance(result, bool):
+        name = getattr(policy, "__qualname__", repr(policy))
+        msg = f"Policy {name} returned {type(result).__name__}, expected bool."
+        raise TypeError(msg)
+    return result
+
+
 def all_of[R](*policies: Policy[R]) -> Policy[R]:
     """Return a policy that allows access only if every given policy allows it.
 
@@ -30,7 +48,7 @@ def all_of[R](*policies: Policy[R]) -> Policy[R]:
         raise ValueError(msg)
 
     def combined(identity: Identity, resource: R) -> bool:
-        return all(policy(identity, resource) for policy in policies)
+        return all(_check(policy, identity, resource) for policy in policies)
 
     return combined
 
@@ -50,7 +68,7 @@ def any_of[R](*policies: Policy[R]) -> Policy[R]:
         raise ValueError(msg)
 
     def combined(identity: Identity, resource: R) -> bool:
-        return any(policy(identity, resource) for policy in policies)
+        return any(_check(policy, identity, resource) for policy in policies)
 
     return combined
 
@@ -59,7 +77,7 @@ def not_[R](policy: Policy[R]) -> Policy[R]:
     """Return a policy that allows access exactly when the given policy denies it."""
 
     def negated(identity: Identity, resource: R) -> bool:
-        return not policy(identity, resource)
+        return not _check(policy, identity, resource)
 
     return negated
 
@@ -77,16 +95,19 @@ def has_permission(authorizer: Authorizer, permission: str) -> Policy[object]:
     return check
 
 
-def is_owner[R](get_owner_id: Callable[[R], str | None]) -> Policy[R]:
+def is_owner[R](get_owner_id: Callable[[R], str | int | None]) -> Policy[R]:
     """Return a policy that allows access if the identity owns the resource.
 
-    ``get_owner_id`` returns the ID of the resource's owner. A resource whose owner ID is
+    ``get_owner_id`` returns the ID of the resource's owner. Integer IDs are converted to
+    strings before they are compared with ``identity.id``. A resource whose owner ID is
     ``None`` is not owned by anyone, so access is always denied.
     """
 
     def owned_by(identity: Identity, resource: R) -> bool:
         owner_id = get_owner_id(resource)
-        return owner_id is not None and owner_id == identity.id
+        if owner_id is None:
+            return False
+        return str(owner_id) == identity.id
 
     return owned_by
 
@@ -97,7 +118,8 @@ def enforce[R](policy: Policy[R], identity: Identity, resource: R) -> None:
     Raises:
         PermissionDeniedError: If the policy denies access. The error does not say which
             part of the policy failed.
+        TypeError: If the policy does not return a ``bool``.
 
     """
-    if not policy(identity, resource):
+    if not _check(policy, identity, resource):
         raise PermissionDeniedError
