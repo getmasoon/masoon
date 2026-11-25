@@ -145,6 +145,28 @@ def test_is_owner_accepts_integer_owner_ids() -> None:
     assert is_owner(lambda _post: 1)(ALICE, ALICES_POST) is True
 
 
+def test_is_owner_denies_empty_owner_id() -> None:
+    user_with_empty_id = Identity(id="", username="empty")
+
+    assert is_owner(lambda _post: "")(ALICE, ALICES_POST) is False
+    assert is_owner(lambda _post: "")(user_with_empty_id, ALICES_POST) is False
+
+
+def test_is_owner_denies_identity_with_empty_id() -> None:
+    user_with_empty_id = Identity(id="", username="empty")
+
+    assert is_owner(lambda post: post.author_id)(user_with_empty_id, ALICES_POST) is False
+
+
+@pytest.mark.parametrize("owner_id", [True, False])
+def test_is_owner_rejects_bool_owner_ids(owner_id: bool) -> None:  # noqa: FBT001
+    user_named_true = Identity(id=str(owner_id), username="bool")
+    policy = is_owner(lambda _post: owner_id)
+
+    with pytest.raises(TypeError, match="not bool"):
+        policy(user_named_true, ALICES_POST)
+
+
 # enforce
 
 

@@ -99,13 +99,24 @@ def is_owner[R](get_owner_id: Callable[[R], str | int | None]) -> Policy[R]:
     """Return a policy that allows access if the identity owns the resource.
 
     ``get_owner_id`` returns the ID of the resource's owner. Integer IDs are converted to
-    strings before they are compared with ``identity.id``. A resource whose owner ID is
-    ``None`` is not owned by anyone, so access is always denied.
+    strings before they are compared with ``identity.id``.
+
+    A resource whose owner ID is ``None`` or an empty string is not owned by anyone, and an
+    identity with an empty ID owns nothing, so access is denied in both cases. This keeps
+    an empty value in the database from ever matching another empty value.
+
+    Raises:
+        TypeError: If ``get_owner_id`` returns a ``bool``. ``True`` and ``False`` are not
+            valid IDs, even though Python treats them as integers.
+
     """
 
     def owned_by(identity: Identity, resource: R) -> bool:
         owner_id = get_owner_id(resource)
-        if owner_id is None:
+        if isinstance(owner_id, bool):
+            msg = f"Owner ID must be a str or int, not bool (got {owner_id!r})."
+            raise TypeError(msg)
+        if owner_id is None or owner_id == "" or identity.id == "":
             return False
         return str(owner_id) == identity.id
 
