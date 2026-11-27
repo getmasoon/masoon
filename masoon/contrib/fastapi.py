@@ -17,14 +17,16 @@ from masoon.errors import InvalidSessionError, PermissionDeniedError
 from masoon.types import Identity
 
 _FORBIDDEN_DETAIL = "Forbidden"
+_NOT_AUTHENTICATED_DETAIL = "Not authenticated"
+_WWW_AUTHENTICATE = "Bearer"
 
 
 def _not_authenticated() -> HTTPException:
     """Return the 401 error used for every authentication failure."""
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Not authenticated",
-        headers={"WWW-Authenticate": "Bearer"},
+        detail=_NOT_AUTHENTICATED_DETAIL,
+        headers={"WWW-Authenticate": _WWW_AUTHENTICATE},
     )
 
 
@@ -174,14 +176,30 @@ async def _permission_denied_handler(_request: Request, _exc: Exception) -> JSON
     )
 
 
+async def _invalid_session_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    """Return the 401 response used when a session token is not valid."""
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": _NOT_AUTHENTICATED_DETAIL},
+        headers={"WWW-Authenticate": _WWW_AUTHENTICATE},
+    )
+
+
 def add_exception_handlers(app: FastAPI) -> None:
     """Register handlers that turn Masoon errors raised in routes into HTTP responses.
 
-    Call this once after creating your application. Afterwards, a
-    ``PermissionDeniedError`` raised inside a route, for example by ``enforce``,
-    returns 403 with ``{"detail": "Forbidden"}``, the same response as
-    ``require_permission``. Without the handler, FastAPI returns 500.
+    Call this once after creating your application. Afterwards:
 
-    The response does not reveal which permission or policy rule failed.
+    - A ``PermissionDeniedError`` raised inside a route, for example by ``enforce``,
+      returns 403 with ``{"detail": "Forbidden"}``, the same response as
+      ``require_permission``.
+    - An ``InvalidSessionError`` raised inside a route, for example when the route
+      calls ``SessionManager.validate`` itself, returns 401 with
+      ``{"detail": "Not authenticated"}`` and a ``WWW-Authenticate: Bearer`` header,
+      the same response as ``current_identity``.
+
+    Without these handlers, FastAPI returns 500 for both errors. The responses do not
+    reveal which permission or policy rule failed, or why a session was rejected.
     """
     app.add_exception_handler(PermissionDeniedError, _permission_denied_handler)
+    app.add_exception_handler(InvalidSessionError, _invalid_session_handler)
