@@ -8,6 +8,16 @@ is below 1.0.0, minor releases may include breaking changes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-28
+
+### Fixed
+
+- `add_exception_handlers(app)` in `masoon.contrib.fastapi` now also turns an
+  `InvalidSessionError` raised inside a route, for example when the route calls
+  `SessionManager.validate` itself, into the standard 401 response with
+  `{"detail": "Not authenticated"}` and a `WWW-Authenticate: Bearer` header. Previously,
+  FastAPI returned a 500 error.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
@@ -98,7 +108,8 @@ is below 1.0.0, minor releases may include breaking changes.
 - A wrong password and an unknown username raise the same error and take about the same
   time, so attackers cannot discover which usernames exist.
 
-[Unreleased]: https://github.com/getmasoon/masoon/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/getmasoon/masoon/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/getmasoon/masoon/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/getmasoon/masoon/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/getmasoon/masoon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/getmasoon/masoon/compare/v0.2.0...v0.3.0
