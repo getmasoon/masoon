@@ -1,6 +1,6 @@
 [project]
 name = "masoon"
-version = "0.5.0"
+version = "0.5.1"
 description = "Framework-agnostic authentication and authorization for Python."
 readme = "README.md"
 license = "Apache-2.0"
