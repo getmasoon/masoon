@@ -416,6 +416,34 @@ How the integration works:
 - **API docs.** Both token locations appear in FastAPI's `/docs` page, so you can test
   protected routes with the **Authorize** button.
 
+### Validating tokens yourself
+
+`current_identity` reads the token from the `Authorization` header or the session cookie.
+If a route gets its token from somewhere else, for example a custom header, call
+`SessionManager.validate` in the route. `add_exception_handlers(app)` turns the
+`InvalidSessionError` it raises into the same 401 response that `current_identity`
+returns, including the `WWW-Authenticate: Bearer` header:
+
+```python
+from fastapi import Header
+
+from masoon import InvalidSessionError
+
+
+@app.get("/reports")
+def reports(x_session_token: Annotated[str | None, Header()] = None) -> dict[str, str]:
+    if x_session_token is None:
+        raise InvalidSessionError  # 401 if the header is missing.
+    identity = sessions.validate(x_session_token)  # 401 if the token is not valid.
+    return {"owner": identity.username}
+```
+
+Make the header optional and raise `InvalidSessionError` yourself when it is missing.
+Otherwise FastAPI rejects the request with `422 Unprocessable Entity` before your code runs.
+
+Avoid passing tokens in the URL, for example as a query parameter. URLs end up in browser
+history, server logs, and `Referer` headers.
+
 ### Policies in FastAPI routes
 
 Policies usually depend on a resource that the route loads first, so call `enforce` inside
@@ -450,9 +478,9 @@ def delete_post(
     del POSTS[post_id]
 ```
 
-Without `add_exception_handlers`, FastAPI treats the error as a bug and returns
-`500 Internal Server Error`. The handler only changes `PermissionDeniedError`; other
-exceptions behave as before.
+Without `add_exception_handlers`, FastAPI treats these errors as bugs and returns
+`500 Internal Server Error`. The handlers only change `PermissionDeniedError` and
+`InvalidSessionError`; other exceptions behave as before.
 
 Define the login route with `def`, not `async def`. Argon2 is deliberately slow, and FastAPI
 runs `def` routes in a thread pool so that hashing does not block other requests.

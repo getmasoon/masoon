@@ -13,9 +13,11 @@ from masoon import (
     Identity,
     InMemoryRoleAssignmentStore,
     InMemorySessionStore,
+    InvalidCredentialsError,
     PermissionDeniedError,
     Role,
     SessionManager,
+    UserAlreadyExistsError,
     enforce,
 )
 from masoon.contrib.fastapi import MasoonFastAPI, add_exception_handlers
@@ -408,6 +410,14 @@ def _policy_app(*, with_handlers: bool) -> TestClient:
         msg = "unrelated bug"
         raise ValueError(msg)
 
+    @fastapi_app.get("/duplicate-user")
+    def duplicate_user() -> dict[str, str]:
+        raise UserAlreadyExistsError(username="alice")
+
+    @fastapi_app.get("/invalid-credentials")
+    def invalid_credentials() -> dict[str, str]:
+        raise InvalidCredentialsError
+
     return TestClient(fastapi_app, raise_server_exceptions=False)
 
 
@@ -467,3 +477,118 @@ def test_policy_denial_without_handler_is_a_server_error() -> None:
     response = client.get("/posts/2")
 
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+# Invalid sessions raised inside routes
+
+
+@dataclass(frozen=True)
+class SessionApp:
+    client: TestClient
+    sessions: SessionManager
+    clock: FakeTime
+    token: str
+
+
+def _session_app(*, with_handlers: bool) -> SessionApp:
+    """Build an app whose route validates a session token itself."""
+    clock = FakeTime()
+    sessions = SessionManager(
+        store=InMemorySessionStore(),
+        validity=timedelta(hours=1),
+        clock=clock,
+    )
+    fastapi_app = FastAPI()
+    if with_handlers:
+        add_exception_handlers(fastapi_app)
+
+    @fastapi_app.get("/validate")
+    def validate_token(token: str) -> dict[str, str]:
+        identity = sessions.validate(token)
+        return {"id": identity.id, "username": identity.username}
+
+    return SessionApp(
+        client=TestClient(fastapi_app, raise_server_exceptions=False),
+        sessions=sessions,
+        clock=clock,
+        token=sessions.create(Identity(id="1", username="alice")),
+    )
+
+
+def test_invalid_session_handler_returns_401() -> None:
+    session_app = _session_app(with_handlers=True)
+
+    response = session_app.client.get("/validate", params={"token": "not-a-real-token"})
+
+    assert_not_authenticated(
+        response.status_code,
+        response.json(),
+        response.headers.get("WWW-Authenticate"),
+    )
+
+
+def test_invalid_session_handler_handles_expired_tokens() -> None:
+    session_app = _session_app(with_handlers=True)
+    session_app.clock.now += timedelta(hours=2)
+
+    response = session_app.client.get("/validate", params={"token": session_app.token})
+
+    assert_not_authenticated(
+        response.status_code,
+        response.json(),
+        response.headers.get("WWW-Authenticate"),
+    )
+
+
+def test_invalid_session_handler_handles_revoked_tokens() -> None:
+    session_app = _session_app(with_handlers=True)
+    session_app.sessions.revoke(session_app.token)
+
+    response = session_app.client.get("/validate", params={"token": session_app.token})
+
+    assert_not_authenticated(
+        response.status_code,
+        response.json(),
+        response.headers.get("WWW-Authenticate"),
+    )
+
+
+def test_invalid_session_handler_matches_current_identity_response(app: App) -> None:
+    handler_response = _session_app(with_handlers=True).client.get(
+        "/validate",
+        params={"token": "not-a-real-token"},
+    )
+    dependency_response = app.client.get("/me")
+
+    assert handler_response.status_code == dependency_response.status_code
+    assert handler_response.json() == dependency_response.json()
+    assert handler_response.headers.get("WWW-Authenticate") == dependency_response.headers.get(
+        "WWW-Authenticate"
+    )
+
+
+def test_invalid_session_handler_allows_valid_tokens() -> None:
+    session_app = _session_app(with_handlers=True)
+
+    response = session_app.client.get("/validate", params={"token": session_app.token})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"id": "1", "username": "alice"}
+
+
+def test_invalid_session_without_handler_is_a_server_error() -> None:
+    session_app = _session_app(with_handlers=False)
+
+    response = session_app.client.get("/validate", params={"token": "not-a-real-token"})
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+@pytest.mark.parametrize("path", ["/duplicate-user", "/invalid-credentials"])
+def test_exception_handler_does_not_affect_other_masoon_errors(path: str) -> None:
+    client = _policy_app(with_handlers=True)
+
+    response = client.get(path)
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert "www-authenticate" not in response.headers
