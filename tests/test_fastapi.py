@@ -13,9 +13,11 @@ from masoon import (
     Identity,
     InMemoryRoleAssignmentStore,
     InMemorySessionStore,
+    InvalidCredentialsError,
     PermissionDeniedError,
     Role,
     SessionManager,
+    UserAlreadyExistsError,
     enforce,
 )
 from masoon.contrib.fastapi import MasoonFastAPI, add_exception_handlers
@@ -408,6 +410,14 @@ def _policy_app(*, with_handlers: bool) -> TestClient:
         msg = "unrelated bug"
         raise ValueError(msg)
 
+    @fastapi_app.get("/duplicate-user")
+    def duplicate_user() -> dict[str, str]:
+        raise UserAlreadyExistsError(username="alice")
+
+    @fastapi_app.get("/invalid-credentials")
+    def invalid_credentials() -> dict[str, str]:
+        raise InvalidCredentialsError
+
     return TestClient(fastapi_app, raise_server_exceptions=False)
 
 
@@ -572,3 +582,13 @@ def test_invalid_session_without_handler_is_a_server_error() -> None:
     response = session_app.client.get("/validate", params={"token": "not-a-real-token"})
 
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+@pytest.mark.parametrize("path", ["/duplicate-user", "/invalid-credentials"])
+def test_exception_handler_does_not_affect_other_masoon_errors(path: str) -> None:
+    client = _policy_app(with_handlers=True)
+
+    response = client.get(path)
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert "www-authenticate" not in response.headers
